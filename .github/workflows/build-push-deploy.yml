@@ -1,0 +1,83 @@
+name: Backstage Build, Push & Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-push-deploy:
+    runs-on: self-hosted
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build backstage bundle in node container
+        working-directory: backstage
+        run: |
+          docker run --rm \
+            -v "$PWD":/app \
+            -w /app \
+            -e HOME=/tmp \
+            -e COREPACK_HOME=/tmp/corepack \
+            -e XDG_CACHE_HOME=/tmp/.cache \
+            --user "$(id -u):$(id -g)" \
+            node:24-slim \
+            sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
+
+      - name: Login to ACR
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          printf '%s' "$ACR_PASSWORD" | docker login \
+            "$ACR_LOGIN_SERVER" -u "$ACR_USERNAME" --password-stdin
+
+      - name: Build image
+        working-directory: backstage
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          docker buildx build . \
+            -f packages/backend/Dockerfile \
+            --platform linux/amd64 \
+            --tag $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
+            --tag $ACR_LOGIN_SERVER/backstage:latest \
+            --load
+
+      - name: Push image
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          docker push $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG
+          docker push $ACR_LOGIN_SERVER/backstage:latest
+
+      - name: Set up kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBECONFIG_DATA" | base64 -d > $HOME/.kube/config
+
+      - name: Deploy to AKS
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          kubectl set image deployment/backstage \
+            backstage=$ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
+            -n backstage
+          kubectl rollout status deployment/backstage \
+            -n backstage --timeout=120s
