@@ -6,6 +6,10 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   build-push-deploy:
     runs-on: self-hosted
@@ -21,6 +25,17 @@ jobs:
         run: |
           echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+
       - name: Build backstage bundle in node container
         working-directory: backstage
         run: |
@@ -33,15 +48,6 @@ jobs:
             --user "$(id -u):$(id -g)" \
             node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
-
-      - name: Login to ACR
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-        run: |
-          printf '%s' "$ACR_PASSWORD" | docker login \
-            "$ACR_LOGIN_SERVER" -u "$ACR_USERNAME" --password-stdin
 
       - name: Build image
         working-directory: backstage
@@ -56,13 +62,19 @@ jobs:
             --tag $ACR_LOGIN_SERVER/backstage:latest \
             --load
 
-      - name: Push image
+      - name: Push image to ACR
         env:
           IMAGE_TAG: ${{ steps.meta.outputs.tag }}
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
           docker push $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG
           docker push $ACR_LOGIN_SERVER/backstage:latest
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v5
+        with:
+          cluster-name: k8s-20-npe-cicd-02
+          resource-group: rg-20-npe-k8s-01
 
       - name: Deploy to AKS
         env:
@@ -72,5 +84,14 @@ jobs:
           kubectl set image deployment/backstage \
             backstage=$ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
             -n backstage
+
+      - name: Verify deployment
+        run: |
           kubectl rollout status deployment/backstage \
             -n backstage --timeout=120s
+
+      - name: Debug pods
+        if: always()
+        run: |
+          kubectl get pods -n backstage -o wide
+          kubectl describe pod -n backstage -l app=backstage
