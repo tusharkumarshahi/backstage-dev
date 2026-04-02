@@ -119,12 +119,8 @@ Once CI is green, merge the PR. The merge triggers `build-push-deploy.yml` autom
 | `ACR_LOGIN_SERVER` | ACR URL (e.g. `myacr.azurecr.io`) |
 | `ACR_USERNAME` | ACR username |
 | `ACR_PASSWORD` | ACR password or token |
-| `KUBECONFIG_DATA` | Base64-encoded kubeconfig for AKS |
 
-To generate `KUBECONFIG_DATA`:
-```bash
-cat ~/.kube/config | base64 | tr -d '\n'
-```
+> **Note:** The self-hosted runner already has `kubectl` access to AKS, so no kubeconfig secret is needed.
 
 ---
 
