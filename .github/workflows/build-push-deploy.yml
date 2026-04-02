@@ -62,36 +62,36 @@ jobs:
             --tag $ACR_LOGIN_SERVER/backstage:latest \
             --load
 
-      - name: Push image to ACR
-        env:
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-        run: |
-          docker push $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG
-          docker push $ACR_LOGIN_SERVER/backstage:latest
+      # - name: Push image to ACR
+      #   env:
+      #     IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+      #     ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      #   run: |
+      #     docker push $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG
+      #     docker push $ACR_LOGIN_SERVER/backstage:latest
 
-      - name: Set AKS context
-        uses: azure/aks-set-context@v5
-        with:
-          cluster-name: k8s-20-npe-cicd-02
-          resource-group: rg-20-npe-k8s-01
+      # - name: Set AKS context
+      #   uses: azure/aks-set-context@v5
+      #   with:
+      #     cluster-name: k8s-20-npe-cicd-02
+      #     resource-group: rg-20-npe-k8s-01
 
-      - name: Deploy to AKS
-        env:
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-        run: |
-          kubectl set image deployment/backstage \
-            backstage=$ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
-            -n backstage
+      # - name: Deploy to AKS
+      #   env:
+      #     IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+      #     ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      #   run: |
+      #     kubectl set image deployment/backstage \
+      #       backstage=$ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
+      #       -n backstage
 
-      - name: Verify deployment
-        run: |
-          kubectl rollout status deployment/backstage \
-            -n backstage --timeout=120s
+      # - name: Verify deployment
+      #   run: |
+      #     kubectl rollout status deployment/backstage \
+      #       -n backstage --timeout=120s
 
-      - name: Debug pods
-        if: always()
-        run: |
-          kubectl get pods -n backstage -o wide
-          kubectl describe pod -n backstage -l app=backstage
+      # - name: Debug pods
+      #   if: always()
+      #   run: |
+      #     kubectl get pods -n backstage -o wide
+      #     kubectl describe pod -n backstage -l app=backstage
