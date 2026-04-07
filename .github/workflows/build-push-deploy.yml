@@ -1,42 +1,119 @@
-name: Backstage Build, Push & Deploy
+name: Backstage Build (Nexus)
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
-  id-token: write
+  actions: read
   contents: read
+  id-token: write
+
+env:
+  VAULT_NAME: kv-20-terradopipeline
+  DPSS_SERVER_URL: https://medica.secretservercloud.com
+  DPSS_DOMAIN: corp.medica.com
+  AKV_SECRET_USERNAME: medica-dev-platform-puma-username
+  AKV_SECRET_PASSWORD: medica-dev-platform-puma-password
+  NEXUS_REGISTRY: nexus.medica.com
 
 jobs:
-  build-push-deploy:
+  build:
     runs-on: self-hosted
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set image metadata
-        id: meta
-        run: |
-          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-
       - name: Azure Login
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Login to ACR
+      - name: Fetch Delinea credentials from Azure Key Vault
+        shell: bash
         run: |
-          az acr login --name ${{ secrets.ACR_LOGIN_SERVER }}
+          DPSS_USERNAME=$(az keyvault secret show \
+            --name "${{ env.AKV_SECRET_USERNAME }}" \
+            --vault-name "${{ env.VAULT_NAME }}" \
+            --query value -o tsv)
 
-      - name: Build backstage bundle in node container
+          DPSS_PASSWORD=$(az keyvault secret show \
+            --name "${{ env.AKV_SECRET_PASSWORD }}" \
+            --vault-name "${{ env.VAULT_NAME }}" \
+            --query value -o tsv)
+
+          echo "::add-mask::$DPSS_PASSWORD"
+          echo "DPSS_USERNAME=$DPSS_USERNAME" >> $GITHUB_ENV
+          echo "DPSS_PASSWORD=$DPSS_PASSWORD" >> $GITHUB_ENV
+
+      - name: Get Delinea access token
+        shell: bash
+        run: |
+          FULL_USERNAME="${{ env.DPSS_DOMAIN }}\\${DPSS_USERNAME}"
+
+          TOKEN=$(curl -s -X POST "${{ env.DPSS_SERVER_URL }}/oauth2/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=password" \
+            --data-urlencode "username=$FULL_USERNAME" \
+            --data-urlencode "password=$DPSS_PASSWORD" | jq -r '.access_token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+            echo "::error::Failed to obtain Delinea access token."
+            exit 1
+          fi
+
+          echo "::add-mask::$TOKEN"
+          echo "DPSS_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Fetch Nexus credentials from Delinea
+        shell: bash
+        run: |
+          fetch_field() {
+            local ID=$1 FIELD=$2
+            local RESP
+            RESP=$(curl -s -X GET "${{ env.DPSS_SERVER_URL }}/api/v1/secrets/${ID}" \
+              -H "Authorization: Bearer $DPSS_TOKEN")
+            echo "$RESP" | jq -r --arg f "$FIELD" \
+              '.items[]? | select(.fieldName==$f) | .itemValue'
+          }
+
+          mask_export() {
+            local VAR=$1 VAL=$2
+            if [ -z "$VAL" ] || [ "$VAL" == "null" ]; then
+              echo "::error::Failed to resolve $VAR"
+              exit 1
+            fi
+            echo "::add-mask::$VAL"
+            echo "$VAR=$VAL" >> $GITHUB_ENV
+          }
+
+          mask_export "NEXUS_USERNAME" "$(fetch_field 27255 Username)"
+          mask_export "NEXUS_PASSWORD" "$(fetch_field 27255 Password)"
+
+      - name: Docker login to Nexus
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.NEXUS_REGISTRY }}
+          username: ${{ env.NEXUS_USERNAME }}
+          password: ${{ env.NEXUS_PASSWORD }}
+
+      - name: Configure npm auth for Nexus
+        working-directory: backstage
+        run: |
+          NEXUS_AUTH=$(echo -n "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" | base64)
+          cat >> .yarnrc.yml <<EOF
+
+          npmRegistries:
+            "https://nexus.medica.com/repository/npm-public/":
+              npmAlwaysAuth: true
+              npmAuthIdent: "${NEXUS_AUTH}"
+          EOF
+          echo "=== .yarnrc.yml ==="
+          cat .yarnrc.yml
+
+      - name: Build backstage bundle
         working-directory: backstage
         run: |
           docker run --rm \
@@ -46,52 +123,25 @@ jobs:
             -e COREPACK_HOME=/tmp/corepack \
             -e XDG_CACHE_HOME=/tmp/.cache \
             --user "$(id -u):$(id -g)" \
-            node:24-slim \
+            ${{ env.NEXUS_REGISTRY }}/node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
 
-      - name: Build image
+      - name: Build Docker image
         working-directory: backstage
-        env:
-          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
           docker buildx build . \
             -f packages/backend/Dockerfile \
             --platform linux/amd64 \
-            --tag $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
-            --tag $ACR_LOGIN_SERVER/backstage:latest \
+            --tag backstage:test \
             --load
 
-      # - name: Push image to ACR
-      #   env:
-      #     IMAGE_TAG: ${{ steps.meta.outputs.tag }}
-      #     ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      #   run: |
-      #     docker push $ACR_LOGIN_SERVER/backstage:$IMAGE_TAG
-      #     docker push $ACR_LOGIN_SERVER/backstage:latest
+      - name: Verify build
+        run: |
+          docker images | grep backstage
+          echo "Build completed successfully through Nexus"
 
-      # - name: Set AKS context
-      #   uses: azure/aks-set-context@v5
-      #   with:
-      #     cluster-name: k8s-20-npe-cicd-02
-      #     resource-group: rg-20-npe-k8s-01
-
-      # - name: Deploy to AKS
-      #   env:
-      #     IMAGE_TAG: ${{ steps.meta.outputs.tag }}
-      #     ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      #   run: |
-      #     kubectl set image deployment/backstage \
-      #       backstage=$ACR_LOGIN_SERVER/backstage:$IMAGE_TAG \
-      #       -n backstage
-
-      # - name: Verify deployment
-      #   run: |
-      #     kubectl rollout status deployment/backstage \
-      #       -n backstage --timeout=120s
-
-      # - name: Debug pods
-      #   if: always()
-      #   run: |
-      #     kubectl get pods -n backstage -o wide
-      #     kubectl describe pod -n backstage -l app=backstage
+      - name: Debug
+        if: always()
+        run: |
+          echo "=== Docker images ==="
+          docker images | head -20
