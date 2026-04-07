@@ -14,7 +14,6 @@ env:
   DPSS_DOMAIN: corp.medica.com
   AKV_SECRET_USERNAME: medica-dev-platform-puma-username
   AKV_SECRET_PASSWORD: medica-dev-platform-puma-password
-  NEXUS_REGISTRY: nexus.medica.com
 
 jobs:
   build:
@@ -92,17 +91,11 @@ jobs:
           mask_export "NEXUS_USERNAME" "$(fetch_field 27255 Username)"
           mask_export "NEXUS_PASSWORD" "$(fetch_field 27255 Password)"
 
-      - name: Docker login to Nexus
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.NEXUS_REGISTRY }}
-          username: ${{ env.NEXUS_USERNAME }}
-          password: ${{ env.NEXUS_PASSWORD }}
-
       - name: Configure npm auth for Nexus
         working-directory: backstage
         run: |
           NEXUS_AUTH=$(echo -n "${NEXUS_USERNAME}:${NEXUS_PASSWORD}" | base64)
+          echo "::add-mask::$NEXUS_AUTH"
           cat >> .yarnrc.yml <<EOF
 
           npmRegistries:
@@ -110,8 +103,7 @@ jobs:
               npmAlwaysAuth: true
               npmAuthIdent: "${NEXUS_AUTH}"
           EOF
-          echo "=== .yarnrc.yml ==="
-          cat .yarnrc.yml
+          echo "npm auth configured for Nexus"
 
       - name: Build backstage bundle
         working-directory: backstage
@@ -123,7 +115,7 @@ jobs:
             -e COREPACK_HOME=/tmp/corepack \
             -e XDG_CACHE_HOME=/tmp/.cache \
             --user "$(id -u):$(id -g)" \
-            ${{ env.NEXUS_REGISTRY }}/node:24-slim \
+            node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
 
       - name: Build Docker image
