@@ -1,0 +1,148 @@
+name: Backstage Infrastructure (Terraform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+env:
+  VAULT_NAME: kv-20-terradopipeline
+  DPSS_SERVER_URL: https://medica.secretservercloud.com
+  DPSS_DOMAIN: corp.medica.com
+  AKV_SECRET_USERNAME: medica-dev-platform-puma-username
+  AKV_SECRET_PASSWORD: medica-dev-platform-puma-password
+
+  # Delinea secret ID containing the DB admin password
+  DELINEA_DB_SECRET_ID: "<PLACEHOLDER>"   # Create a Delinea secret with the DB password
+
+  # Terraform variables (non-sensitive — update these for your environment)
+  TF_VAR_subscription_id:        ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_environment:            "dev"
+  TF_VAR_location:               "centralus"
+  TF_VAR_resource_group_name:    "rg-20-npe-k8s-01"
+  TF_VAR_server_name:            "psql-backstage-npe"
+  TF_VAR_db_admin_user:          "backstage"
+  TF_VAR_sku_name:               "B_Standard_B1ms"
+  TF_VAR_postgres_version:       "16"
+  TF_VAR_storage_mb:             "32768"
+  TF_VAR_vnet_name:              "<AKS_VNET_NAME>"
+  TF_VAR_vnet_resource_group:    "rg-20-npe-k8s-01"
+  TF_VAR_postgres_subnet_prefix: "10.1.4.0/24"
+  TF_VAR_key_vault_name:         "kv-20-terradopipeline"
+  TF_VAR_key_vault_resource_group: "<KEY_VAULT_RG>"
+
+  # Required tags
+  TF_VAR_owner:         "<OWNER>"
+  TF_VAR_supported_by:  "<TEAM>"
+  TF_VAR_requestor:     "<REQUESTOR>"
+  TF_VAR_support_level: "tier-2"
+  TF_VAR_department:    "<DEPARTMENT>"
+
+jobs:
+  terraform:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # --- Delinea secret chain (same pattern as build workflow) ---
+
+      - name: Fetch Delinea credentials from Azure Key Vault
+        shell: bash
+        run: |
+          DPSS_USERNAME=$(az keyvault secret show \
+            --name "${{ env.AKV_SECRET_USERNAME }}" \
+            --vault-name "${{ env.VAULT_NAME }}" \
+            --query value -o tsv)
+
+          DPSS_PASSWORD=$(az keyvault secret show \
+            --name "${{ env.AKV_SECRET_PASSWORD }}" \
+            --vault-name "${{ env.VAULT_NAME }}" \
+            --query value -o tsv)
+
+          echo "::add-mask::$DPSS_PASSWORD"
+          echo "DPSS_USERNAME=$DPSS_USERNAME" >> $GITHUB_ENV
+          echo "DPSS_PASSWORD=$DPSS_PASSWORD" >> $GITHUB_ENV
+
+      - name: Get Delinea access token
+        shell: bash
+        run: |
+          FULL_USERNAME="${{ env.DPSS_DOMAIN }}\\${DPSS_USERNAME}"
+
+          TOKEN=$(curl -s -X POST "${{ env.DPSS_SERVER_URL }}/oauth2/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=password" \
+            --data-urlencode "username=$FULL_USERNAME" \
+            --data-urlencode "password=$DPSS_PASSWORD" | jq -r '.access_token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+            echo "::error::Failed to obtain Delinea access token."
+            exit 1
+          fi
+
+          echo "::add-mask::$TOKEN"
+          echo "DPSS_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Fetch DB password from Delinea
+        shell: bash
+        run: |
+          RESP=$(curl -s -X GET "${{ env.DPSS_SERVER_URL }}/api/v1/secrets/${{ env.DELINEA_DB_SECRET_ID }}" \
+            -H "Authorization: Bearer $DPSS_TOKEN")
+
+          DB_PASSWORD=$(echo "$RESP" | jq -r '.items[]? | select(.fieldName=="Password") | .itemValue')
+
+          if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" == "null" ]; then
+            echo "::error::Failed to fetch DB password from Delinea secret ${{ env.DELINEA_DB_SECRET_ID }}"
+            exit 1
+          fi
+
+          echo "::add-mask::$DB_PASSWORD"
+          echo "TF_VAR_db_admin_password=$DB_PASSWORD" >> $GITHUB_ENV
+
+      # --- Terraform ---
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config=backend.tfbackend
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply'
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Show Outputs
+        if: inputs.action == 'apply'
+        working-directory: terraform
+        run: |
+          echo "=== PostgreSQL Flexible Server ==="
+          terraform output postgres_fqdn
+          terraform output postgres_admin_user
+          echo ""
+          echo "=== Key Vault Secrets Created ==="
+          terraform output key_vault_secret_names
+          echo ""
+          echo "DB credentials stored in Key Vault. Backstage Helm deployment can read them via CSI driver."

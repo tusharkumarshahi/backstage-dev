@@ -1,0 +1,35 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# Do NOT commit terraform.tfvars — it is gitignored.
+
+subscription_id = "<AZURE_SUBSCRIPTION_ID>"
+environment     = "dev"
+location        = "centralus"
+
+# Resource group where the PostgreSQL server will be created
+resource_group_name = "rg-20-npe-k8s-01"
+
+# PostgreSQL Flexible Server
+server_name       = "psql-backstage-npe"
+db_admin_user     = "backstage"
+db_admin_password = ""  # Provided at runtime via Delinea — do not hardcode
+sku_name          = "B_Standard_B1ms"
+postgres_version  = "16"
+storage_mb        = 32768
+
+# Existing VNet where AKS runs
+vnet_name            = "<AKS_VNET_NAME>"
+vnet_resource_group  = "rg-20-npe-k8s-01"
+
+# Subnet for PostgreSQL (must not overlap with existing subnets)
+postgres_subnet_prefix = "10.1.4.0/24"
+
+# Key Vault to store DB credentials
+key_vault_name            = "kv-20-terradopipeline"
+key_vault_resource_group  = "<KEY_VAULT_RG>"
+
+# Required Tags
+owner         = "<OWNER>"
+supported_by  = "<TEAM>"
+requestor     = "<REQUESTOR>"
+support_level = "tier-2"
+department    = "<DEPARTMENT>"

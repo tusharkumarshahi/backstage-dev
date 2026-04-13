@@ -118,6 +118,19 @@ jobs:
             node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
 
+      - name: Audit npm dependencies
+        working-directory: backstage
+        run: |
+          docker run --rm \
+            -v "$PWD":/app \
+            -w /app \
+            -e HOME=/tmp \
+            -e COREPACK_HOME=/tmp/corepack \
+            -e XDG_CACHE_HOME=/tmp/.cache \
+            --user "$(id -u):$(id -g)" \
+            node:24-slim \
+            sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn npm audit --severity high"
+
       - name: Build Docker image
         working-directory: backstage
         run: |
