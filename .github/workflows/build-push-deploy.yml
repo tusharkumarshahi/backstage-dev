@@ -1,4 +1,4 @@
-name: Backstage Build (Nexus)
+name: Backstage Build, Push & Deploy
 
 on:
   workflow_dispatch:
@@ -134,19 +134,49 @@ jobs:
       - name: Build Docker image
         working-directory: backstage
         run: |
+          IMAGE_TAG=${{ github.sha }}
+          ACR=${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
           docker buildx build . \
             -f packages/backend/Dockerfile \
             --platform linux/amd64 \
-            --tag backstage:test \
+            --tag ${ACR}/backstage:${IMAGE_TAG} \
+            --tag ${ACR}/backstage:latest \
             --load
 
-      - name: Verify build
-        run: |
-          docker images | grep backstage
-          echo "Build completed successfully through Nexus"
+      # --- Push to ACR ---
 
-      - name: Debug
+      - name: ACR Login
+        run: az acr login --name ${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
+
+      - name: Push image to ACR
+        run: |
+          ACR=${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
+          docker push ${ACR}/backstage:${{ github.sha }}
+          docker push ${ACR}/backstage:latest
+
+      # --- Deploy to AKS ---
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v5
+        with:
+          cluster-name: k8s-20-npe-cicd-02
+          resource-group: rg-20-npe-k8s-01
+
+      - name: Update Backstage image
+        run: |
+          ACR=${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
+          kubectl set image deployment/backstage \
+            backstage=${ACR}/backstage:${{ github.sha }} \
+            -n backstage
+
+      - name: Verify deployment
+        run: kubectl rollout status deployment/backstage -n backstage --timeout=120s
+
+      # --- Cleanup ---
+
+      - name: Cleanup local Docker images
         if: always()
         run: |
-          echo "=== Docker images ==="
-          docker images | head -20
+          ACR=${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
+          docker rmi ${ACR}/backstage:${{ github.sha }} || true
+          docker rmi ${ACR}/backstage:latest || true

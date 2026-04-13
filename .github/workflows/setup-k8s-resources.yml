@@ -22,79 +22,37 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # TEMPORARY: Delete backstage image from ACR — remove this step after cleanup
-      - name: Delete backstage image from ACR
+      - name: Set AKS context
+        uses: azure/aks-set-context@v5
+        with:
+          cluster-name: k8s-20-npe-cicd-02
+          resource-group: rg-20-npe-k8s-01
+
+      - name: Create namespace
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Create Backstage secrets
         run: |
-          az acr repository delete --name ${{ secrets.ACR_LOGIN_SERVER }} --repository backstage --yes || echo "Repository not found or already deleted"
+          kubectl create secret generic backstage-secrets \
+            --from-literal=GITHUB_TOKEN=${{ secrets.BACKSTAGE_GITHUB_TOKEN }} \
+            -n backstage \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-      # - name: Set AKS context
-      #   uses: azure/aks-set-context@v5
-      #   with:
-      #     cluster-name: k8s-20-npe-cicd-02
-      #     resource-group: rg-20-npe-k8s-01
+      - name: Apply postgres resources
+        run: |
+          kubectl apply -f k8s/postgres-secret.yaml
+          kubectl apply -f k8s/postgres-storage.yaml
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl apply -f k8s/postgres-service.yaml
 
-      # - name: Create namespace
-      #   run: |
-      #     kubectl apply -f k8s/namespace.yaml
+      - name: Apply backstage resources
+        run: |
+          kubectl apply -f k8s/backstage-service.yaml
+          kubectl apply -f k8s/backstage-deployment.yaml
 
-      # - name: Create postgres secrets
-      #   run: |
-      #     kubectl create secret generic postgres-secrets \
-      #       --from-literal=POSTGRES_USER=backstage \
-      #       --from-literal=POSTGRES_PASSWORD=backstage123 \
-      #       --from-literal=POSTGRES_HOST=postgres.backstage \
-      #       --from-literal=POSTGRES_PORT=5432 \
-      #       -n backstage \
-      #       --dry-run=client -o yaml | kubectl apply -f -
+      - name: Wait for postgres
+        run: kubectl rollout status deployment/postgres -n backstage --timeout=120s
 
-      # - name: Create backstage secrets
-      #   run: |
-      #     kubectl create secret generic backstage-secrets \
-      #       --from-literal=GITHUB_TOKEN=placeholder \
-      #       -n backstage \
-      #       --dry-run=client -o yaml | kubectl apply -f -
-
-      # - name: Apply postgres resources
-      #   run: |
-      #     kubectl apply -f k8s/postgres-storage.yaml
-      #     kubectl apply -f k8s/postgres-deployment.yaml
-      #     kubectl apply -f k8s/postgres-service.yaml
-
-      # - name: Apply backstage deployment
-      #   env:
-      #     ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      #   run: |
-      #     sed "s|<ACR_LOGIN_SERVER>|$ACR_LOGIN_SERVER|g" k8s/backstage-deployment.yaml | kubectl apply -f -
-
-      # - name: Apply backstage service
-      #   run: |
-      #     kubectl apply -f k8s/backstage-service.yaml
-
-      # - name: Wait for pods
-      #   run: |
-      #     echo "Waiting for postgres..."
-      #     kubectl rollout status deployment/postgres -n backstage --timeout=120s
-      #     echo "Waiting for backstage..."
-      #     kubectl rollout status deployment/backstage -n backstage --timeout=120s
-
-      # - name: Get LoadBalancer IP
-      #   run: |
-      #     echo "Waiting for LoadBalancer IP..."
-      #     for i in $(seq 1 30); do
-      #       IP=$(kubectl get svc backstage -n backstage -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-      #       if [ -n "$IP" ]; then
-      #         echo "==========================================="
-      #         echo "Backstage is accessible at: http://$IP"
-      #         echo "==========================================="
-      #         exit 0
-      #       fi
-      #       echo "Waiting... ($i/30)"
-      #       sleep 10
-      #     done
-      #     echo "LoadBalancer IP not assigned yet. Check manually:"
-      #     echo "kubectl get svc backstage -n backstage"
-
-      # - name: Debug - show all resources
-      #   if: always()
-      #   run: |
-      #     kubectl get all -n backstage
+      - name: Show resources
+        if: always()
+        run: kubectl get all -n backstage
