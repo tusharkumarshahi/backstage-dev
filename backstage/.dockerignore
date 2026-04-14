@@ -5,4 +5,20 @@ node_modules
 packages/*/src
 packages/*/node_modules
 plugins
+
+# Sensitive and unnecessary files
 *.local.yaml
+.env*
+*.secret
+*.pem
+*.key
+
+# Build/test artifacts
+coverage
+dist
+*.log
+
+# Documentation
+*.md
+!README.md
+docs

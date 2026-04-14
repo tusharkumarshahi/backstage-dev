@@ -14,6 +14,7 @@ env:
   DPSS_DOMAIN: corp.medica.com
   AKV_SECRET_USERNAME: medica-dev-platform-puma-username
   AKV_SECRET_PASSWORD: medica-dev-platform-puma-password
+  NEXUS_DOCKER_REGISTRY: nexus.medica.com:8086
 
 jobs:
   build:
@@ -91,6 +92,11 @@ jobs:
           mask_export "NEXUS_USERNAME" "$(fetch_field 27255 Username)"
           mask_export "NEXUS_PASSWORD" "$(fetch_field 27255 Password)"
 
+      - name: Login to Nexus Docker registry
+        run: |
+          echo "${NEXUS_PASSWORD}" | docker login ${{ env.NEXUS_DOCKER_REGISTRY }} \
+            --username "${NEXUS_USERNAME}" --password-stdin
+
       - name: Configure npm auth for Nexus
         working-directory: backstage
         run: |
@@ -115,7 +121,7 @@ jobs:
             -e COREPACK_HOME=/tmp/corepack \
             -e XDG_CACHE_HOME=/tmp/.cache \
             --user "$(id -u):$(id -g)" \
-            node:24-slim \
+            ${{ env.NEXUS_DOCKER_REGISTRY }}/node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn install --frozen-lockfile && corepack yarn tsc && corepack yarn build:backend"
 
       - name: Audit npm dependencies
@@ -128,7 +134,7 @@ jobs:
             -e COREPACK_HOME=/tmp/corepack \
             -e XDG_CACHE_HOME=/tmp/.cache \
             --user "$(id -u):$(id -g)" \
-            node:24-slim \
+            ${{ env.NEXUS_DOCKER_REGISTRY }}/node:24-slim \
             sh -c "corepack prepare yarn@4.4.1 --activate && corepack yarn npm audit --severity high"
 
       - name: Build Docker image
@@ -139,9 +145,42 @@ jobs:
           docker buildx build . \
             -f packages/backend/Dockerfile \
             --platform linux/amd64 \
+            --build-arg NEXUS_DOCKER_REGISTRY=${{ env.NEXUS_DOCKER_REGISTRY }} \
             --tag ${ACR}/backstage:${IMAGE_TAG} \
             --tag ${ACR}/backstage:latest \
             --load
+
+      # --- Trivy Image Scan ---
+
+      - name: Cleanup Trivy cache (prevent disk issues)
+        run: rm -rf /apps/temp/* || true
+
+      - name: Scan image with Trivy (SARIF)
+        id: trivy
+        run: |
+          ACR=${{ secrets.ACR_LOGIN_SERVER_SANDBOX }}
+          SAFE_IMAGE=$(echo "${ACR}/backstage:${{ github.sha }}" | sed 's/[\/:]/_/g')
+
+          export TRIVY_CACHE_DIR=/apps/trivy-cache
+          mkdir -p $TRIVY_CACHE_DIR
+          mkdir -p $TMPDIR
+
+          trivy image \
+            --format sarif \
+            --output trivy-${SAFE_IMAGE}.sarif \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            ${ACR}/backstage:${{ github.sha }}
+
+          echo "safe_image=${SAFE_IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-${{ github.sha }}
+          path: trivy-*.sarif
+          retention-days: 30
 
       # --- Push to ACR ---
 

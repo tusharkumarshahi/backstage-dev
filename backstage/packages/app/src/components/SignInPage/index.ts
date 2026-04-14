@@ -1,0 +1,1 @@
+export { MedicaSignInPage } from './SignInPage';

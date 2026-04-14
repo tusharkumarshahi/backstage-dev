@@ -1,0 +1,15 @@
+/* ===== Minimal Backstage Default Styles ===== */
+
+/* Basic reset - let Backstage handle most styling */
+body {
+  margin: 0;
+  padding: 0;
+}
+
+/* ===== Sidebar ===== */
+/* White sidebar with subtle right border — matches client Docusaurus site */
+nav[class*="MuiDrawer-paper"],
+div[class*="MuiDrawer-paper"] {
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0, 0, 0, 0.12) !important;
+}
